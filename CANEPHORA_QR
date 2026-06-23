@@ -1,0 +1,206 @@
+// =====================================================
+// SCRIPT DE PRECIPITACIÓN MEDIA ANUAL CON CLASIFICACIÓN
+// Fuente: CHIRPS | Período: 1981-2020 | Área: Colombia
+// =====================================================
+
+// 1. DEFINIR ÁREA DE ESTUDIO - COLOMBIA
+//var colombia = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
+//  .filter(ee.Filter.eq('country_co', 'CO'));
+
+// Alternativamente, puedes usar coordenadas específicas:
+var colombia = ee.Geometry.Rectangle([-80.5, -5.0, -65.5, 14.5]);
+
+
+// 2. CARGAR DATASET CHIRPS
+var chirps = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+  .filterDate('1981-01-01', '2020-12-31')
+  .filterBounds(colombia);
+
+// 3. FUNCIÓN PARA CALCULAR PRECIPITACIÓN ANUAL
+var calcularPrecipitacionAnual = function(year) {
+  var yearStart = ee.Date.fromYMD(year, 1, 1);
+  var yearEnd = yearStart.advance(1, 'year');
+  
+  var precipitacionAnual = chirps
+    .filterDate(yearStart, yearEnd)
+    .sum()
+    .clip(colombia)
+    .set({
+      'year': year,
+      'system:time_start': yearStart.millis()
+    });
+  
+  return precipitacionAnual;
+};
+
+// 4. CALCULAR PRECIPITACIÓN ANUAL PARA CADA AÑO
+var years = ee.List.sequence(1981, 2020);
+var precipitacionAnualCol = ee.ImageCollection.fromImages(
+  years.map(function(year) {
+    return calcularPrecipitacionAnual(year);
+  })
+);
+
+// 5. CALCULAR PRECIPITACIÓN MEDIA ANUAL (1981-2020)
+var precipitacionMediaAnual = precipitacionAnualCol.mean();
+
+// 6. APLICAR CLASIFICACIÓN SEGÚN LOS RANGOS ESPECIFICADOS
+// < 1080 mm = 0
+// 1080-1620 mm = 1
+// 1620-2160 mm = 2
+// 2160-3240 mm = 1
+// > 3240 mm = 0
+
+var precipitacionClasificada = precipitacionMediaAnual
+  .where(precipitacionMediaAnual.lt(1080), 0)
+  .where(precipitacionMediaAnual.gte(1080).and(precipitacionMediaAnual.lt(1620)), 1)
+  .where(precipitacionMediaAnual.gte(1620).and(precipitacionMediaAnual.lt(2160)), 2)
+  .where(precipitacionMediaAnual.gte(2160).and(precipitacionMediaAnual.lt(3240)), 1)
+  .where(precipitacionMediaAnual.gte(3240), 0);
+
+// 7. VISUALIZACIÓN
+// Centrar el mapa en Colombia
+Map.centerObject(colombia, 6);
+
+// Parámetros de visualización para precipitación media anual
+var precipitacionVis = {
+  min: 0,
+  max: 4000,
+  palette: ['red', 'orange', 'yellow', 'lightgreen', 'darkgreen', 'blue', 'darkblue']
+};
+
+// Parámetros de visualización para clasificación
+var clasificacionVis = {
+  min: 0,
+  max: 2,
+  palette: ['red', 'yellow', 'green']
+};
+
+// Añadir capas al mapa
+Map.addLayer(precipitacionMediaAnual, precipitacionVis, 
+  'Precipitación Media Anual (mm)', false);
+Map.addLayer(precipitacionClasificada, clasificacionVis, 
+  'Precipitación Clasificada', true);
+Map.addLayer(colombia, {}, 'Colombia', true, 0.5);
+
+// 8. AÑADIR LEYENDA
+var leyenda = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+var tituloLeyenda = ui.Label({
+  value: 'Clasificación de Precipitación',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '14px',
+    margin: '0 0 4px 0'
+  }
+});
+
+leyenda.add(tituloLeyenda);
+
+var colores = ['red', 'yellow', 'green'];
+var nombres = ['Clase 0 (<1080 o >3240 mm)', 
+               'Clase 1 (1080-1620 o 2160-3240 mm)', 
+               'Clase 2 (1620-2160 mm)'];
+
+nombres.forEach(function(nombre, i) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: colores[i],
+      padding: '10px',
+      margin: '0 0 4px 0'
+    }
+  });
+  
+  var descripcion = ui.Label({
+    value: nombre,
+    style: {margin: '0 0 4px 6px'}
+  });
+  
+  leyenda.add(ui.Panel({
+    widgets: [colorBox, descripcion],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  }));
+});
+
+Map.add(leyenda);
+
+// 9. ESTADÍSTICAS
+var stats = precipitacionMediaAnual.reduceRegion({
+  reducer: ee.Reducer.mean()
+    .combine(ee.Reducer.min(), '', true)
+    .combine(ee.Reducer.max(), '', true)
+    .combine(ee.Reducer.stdDev(), '', true),
+  geometry: colombia,
+  scale: 5000,
+  maxPixels: 1e13
+});
+
+print('Estadísticas de Precipitación Media Anual (1981-2020):');
+print('Media (mm):', stats.get('precipitation_mean'));
+print('Mínima (mm):', stats.get('precipitation_min'));
+print('Máxima (mm):', stats.get('precipitation_max'));
+print('Desviación Estándar (mm):', stats.get('precipitation_stdDev'));
+
+// Calcular áreas por clase
+var areaImagen = ee.Image.pixelArea().divide(1000000); // Convertir a km²
+var areasClase = areaImagen.addBands(precipitacionClasificada)
+  .reduceRegion({
+    reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'clase'
+    }),
+    geometry: colombia,
+    scale: 5000,
+    maxPixels: 1e13
+  });
+
+print('Áreas por Clase de Precipitación:');
+print(areasClase);
+
+// 10. EXPORTAR RESULTADOS
+// Exportar imagen clasificada a Google Drive
+Export.image.toDrive({
+  image: precipitacionClasificada.toByte(),
+  description: 'Precipitacion_Clasificada_Colombia_1981_2020',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'precipitacion_clasificada',
+  region: colombia,
+  scale: 5000,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Exportar imagen de precipitación media anual
+Export.image.toDrive({
+  image: precipitacionMediaAnual.toFloat(),
+  description: 'Precipitacion_Media_Anual_Colombia_1981_2020',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'precipitacion_media_anual',
+  region: colombia,
+  scale: 5000,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// 11. GRÁFICO DE SERIE TEMPORAL (OPCIONAL)
+var graficoSerieTemporal = ui.Chart.image.series({
+  imageCollection: precipitacionAnualCol,
+  region: colombia,
+  reducer: ee.Reducer.mean(),
+  scale: 10000,
+  xProperty: 'year'
+}).setOptions({
+  title: 'Precipitación Anual Promedio en Colombia (1981-2020)',
+  hAxis: {title: 'Año'},
+  vAxis: {title: 'Precipitación (mm)'},
+  lineWidth: 2,
+  pointSize: 3,
+  colors: ['blue']
+});
+
+print(graficoSerieTemporal);
