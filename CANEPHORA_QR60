@@ -1,0 +1,279 @@
+// ============================================================
+// ANÁLISIS DE PRECIPITACIÓN - CAPAS SEPARADAS
+// Umbral: 60 mm acumulados de forma consecutiva
+// Área: Colombia | Fuente: CHIRPS Pentad
+// ============================================================
+
+var startYear = 2000;
+var endYear   = 2023;
+var umbral    = 60;  // ← cambiado de 180 a 60 mm
+
+var colombia = ee.Geometry.Rectangle([-80.5, -5.0, -65.5, 14.5]);
+
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/PENTAD')
+  .filter(ee.Filter.date(startYear + '-01-01', endYear + '-12-31'))
+  .filterBounds(colombia);
+
+var years  = ee.List.sequence(startYear, endYear);
+var months = ee.List.sequence(1, 12);
+
+// ============================================================
+// BLOQUE 1 – PRECIPITACIÓN MEDIA MENSUAL HISTÓRICA
+// ============================================================
+var monthlyMeanList = months.map(function(month) {
+  var monthlySumByYear = ee.ImageCollection(
+    years.map(function(year) {
+      return chirps
+        .filter(ee.Filter.calendarRange(year,  year,  'year'))
+        .filter(ee.Filter.calendarRange(month, month, 'month'))
+        .sum()
+        .rename('precip')
+        .clip(colombia);
+    })
+  );
+  return monthlySumByYear.mean().rename('precip');
+});
+
+// 12 imágenes independientes (una por mes)
+var img01 = ee.Image(monthlyMeanList.get(0));
+var img02 = ee.Image(monthlyMeanList.get(1));
+var img03 = ee.Image(monthlyMeanList.get(2));
+var img04 = ee.Image(monthlyMeanList.get(3));
+var img05 = ee.Image(monthlyMeanList.get(4));
+var img06 = ee.Image(monthlyMeanList.get(5));
+var img07 = ee.Image(monthlyMeanList.get(6));
+var img08 = ee.Image(monthlyMeanList.get(7));
+var img09 = ee.Image(monthlyMeanList.get(8));
+var img10 = ee.Image(monthlyMeanList.get(9));
+var img11 = ee.Image(monthlyMeanList.get(10));
+var img12 = ee.Image(monthlyMeanList.get(11));
+
+var imgList = ee.List([img01,img02,img03,img04,img05,img06,
+                       img07,img08,img09,img10,img11,img12]);
+
+// ============================================================
+// BLOQUE 2 – VENTANA DESLIZANTE CON WRAP CIRCULAR
+// ============================================================
+function maxAccumWindow(windowSize) {
+  var starts = ee.List.sequence(0, 11);
+
+  var windowSums = ee.ImageCollection(
+    starts.map(function(startIdx) {
+      startIdx = ee.Number(startIdx);
+
+      var indices = ee.List.sequence(0, ee.Number(windowSize).subtract(1))
+        .map(function(offset) {
+          return startIdx.add(offset).mod(12);
+        });
+
+      var sumImg = ee.ImageCollection(
+        indices.map(function(idx) {
+          return ee.Image(imgList.get(ee.Number(idx).int()));
+        })
+      ).sum().rename('precip');
+
+      return sumImg;
+    })
+  );
+
+  return windowSums.max().rename('precip');
+}
+
+// ============================================================
+// BLOQUE 3 – ACUMULADOS POR VENTANA
+// Solo necesitamos hasta 6 meses según los nuevos umbrales
+// ============================================================
+var acc1 = maxAccumWindow(1);
+var acc2 = maxAccumWindow(2);
+var acc3 = maxAccumWindow(3);
+var acc4 = maxAccumWindow(4);
+var acc5 = maxAccumWindow(5);
+var acc6 = maxAccumWindow(6);
+var acc7 = maxAccumWindow(7);   // ← para detectar > 6 meses
+
+// ============================================================
+// BLOQUE 4 – MÍNIMO N° DE MESES CONSECUTIVOS PARA >= 60 mm
+// ============================================================
+var minMeses = ee.Image(99).clip(colombia).rename('min_meses_consec');
+
+// De mayor a menor: el menor N que cumpla sobrescribe al mayor
+minMeses = minMeses
+  .where(acc7.gte(umbral),  7)  // > 6 meses → quedará en clase 0
+  .where(acc6.gte(umbral),  6)
+  .where(acc5.gte(umbral),  5)
+  .where(acc4.gte(umbral),  4)
+  .where(acc3.gte(umbral),  3)
+  .where(acc2.gte(umbral),  2)
+  .where(acc1.gte(umbral),  1)
+  .clip(colombia);
+
+// ============================================================
+// BLOQUE 5 – CLASIFICACIÓN MESES CONSECUTIVOS
+//
+// < 2 meses              → 0  (acumula muy rápido)
+// 2 a < 4 meses          → 1
+// 4 a < 6 meses          → 2  (óptimo)
+// >= 6 meses o no alcanza → 0  (muy seco / no alcanza)
+// ============================================================
+var claseMeses = ee.Image(0).rename('clase_meses')
+  .where(minMeses.gte(2).and(minMeses.lt(4)), 1)
+  .where(minMeses.gte(4).and(minMeses.lt(6)), 2)
+  .clip(colombia);
+
+// ============================================================
+// BLOQUE 6 – PRECIPITACIÓN MEDIA ANUAL
+// ============================================================
+var annualPrecip = ee.ImageCollection(
+  years.map(function(year) {
+    return chirps
+      .filter(ee.Filter.calendarRange(year, year, 'year'))
+      .sum()
+      .rename('precip_anual')
+      .clip(colombia)
+      .set('year', year);
+  })
+);
+var meanAnnualPrecip = annualPrecip.mean()
+  .rename('precip_anual_mm')
+  .clip(colombia);
+
+var claseAnual = ee.Image(0).rename('clase_anual')
+  .where(meanAnnualPrecip.gte(1080).and(meanAnnualPrecip.lt(1620)), 1)
+  .where(meanAnnualPrecip.gte(1620).and(meanAnnualPrecip.lt(2160)), 2)
+  .where(meanAnnualPrecip.gte(2160).and(meanAnnualPrecip.lt(3240)), 1)
+  .clip(colombia);
+
+// ============================================================
+// BLOQUE 7 – SCORE COMBINADO
+// ============================================================
+var scoreCombinado = claseAnual.add(claseMeses)
+  .rename('score_combinado')
+  .clip(colombia);
+
+// ============================================================
+// VISUALIZACIÓN
+// ============================================================
+Map.centerObject(colombia, 5);
+
+Map.addLayer(meanAnnualPrecip,
+  {min:0, max:4000, palette:['#f7fbff','#9ecae1','#2171b5','#08306b']},
+  '① Precip. Media Anual (mm)', false);
+
+Map.addLayer(minMeses,
+  {min:1, max:7, palette:['#1a9850','#91cf60','#fee08b','#fc8d59','#d73027']},
+  '② Meses consecutivos para ≥ 60 mm', false);
+
+Map.addLayer(claseAnual,
+  {min:0, max:2, palette:['#d73027','#fee08b','#1a9850']},
+  '③ Clase – Precip. Anual', false);
+
+Map.addLayer(claseMeses,
+  {min:0, max:2, palette:['#d73027','#fee08b','#1a9850']},
+  '④ Clase – Meses Consecutivos', false);
+
+Map.addLayer(scoreCombinado,
+  {min:0, max:4, palette:['#d73027','#fc8d59','#fee08b','#91cf60','#1a9850']},
+  '⑤ Score Combinado (0–4)', true);
+
+// ============================================================
+// LEYENDA
+// ============================================================
+var legend = ui.Panel({
+  style:{position:'bottom-left', padding:'10px 15px', backgroundColor:'white'}
+});
+
+legend.add(ui.Label('Score Combinado (0–4)',
+  {fontWeight:'bold', fontSize:'13px', margin:'0 0 4px 0'}));
+
+[
+  {color:'#d73027', label:'0 – Desfavorable'},
+  {color:'#fc8d59', label:'1 – Bajo'},
+  {color:'#fee08b', label:'2 – Moderado'},
+  {color:'#91cf60', label:'3 – Bueno'},
+  {color:'#1a9850', label:'4 – Óptimo'},
+].forEach(function(c){
+  var row = ui.Panel({layout:ui.Panel.Layout.flow('horizontal')});
+  row.add(ui.Label('',{backgroundColor:c.color,
+    padding:'7px', margin:'0 8px 3px 0', border:'1px solid #ccc'}));
+  row.add(ui.Label(c.label, {margin:'0 0 3px 0'}));
+  legend.add(row);
+});
+
+legend.add(ui.Label('────────────────────',{color:'#ccc', margin:'4px 0'}));
+legend.add(ui.Label('Meses consecutivos para ≥ 60 mm:',
+  {fontWeight:'bold', fontSize:'11px'}));
+[
+  '  0 → < 2 meses  |  ≥ 6 meses  |  no alcanza',
+  '  1 → 2 a < 4 meses',
+  '  2 → 4 a < 6 meses  ✓ óptimo',
+].forEach(function(t){
+  legend.add(ui.Label(t, {fontSize:'11px', margin:'1px 0'}));
+});
+
+Map.add(legend);
+
+// ============================================================
+// CONSOLA
+// ============================================================
+print('Meses consecutivos mínimos para ≥ 60 mm:', minMeses);
+print('Clase meses consecutivos:', claseMeses);
+print('Clase precipitación anual:', claseAnual);
+print('Score combinado (0–4):', scoreCombinado);
+
+// ============================================================
+// EXPORTAR – CAPAS SEPARADAS
+// ============================================================
+Export.image.toDrive({
+  image: meanAnnualPrecip,
+  description: '01_Precip_Media_Anual',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
+
+Export.image.toDrive({
+  image: minMeses,
+  description: '02_Min_Meses_Consecutivos_60mm',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
+
+Export.image.toDrive({
+  image: claseAnual,
+  description: '03_Clase_Precip_Anual',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
+
+Export.image.toDrive({
+  image: claseMeses,
+  description: '04_Clase_Meses_Consecutivos_60mm',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
+
+Export.image.toDrive({
+  image: scoreCombinado,
+  description: '05_Score_Combinado',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
