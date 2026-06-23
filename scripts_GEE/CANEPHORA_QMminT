@@ -1,0 +1,116 @@
+// ============================================================
+// TEMPERATURA MÍNIMA MEDIA ANUAL - CHIRTS
+// Clasificación por umbrales de Tmin
+// Área: Colombia
+// ============================================================
+
+var startYear = 2000;
+var endYear   = 2023;
+
+var colombia = ee.Geometry.Rectangle([-80.5, -5.0, -65.5, 14.5]);
+
+var chirts_tmin = ee.ImageCollection('UCSB-CHG/CHIRTS/DAILY')
+  .filter(ee.Filter.date(startYear + '-01-01', endYear + '-12-31'))
+  .filterBounds(colombia)
+  .select('minimum_temperature');
+
+var years = ee.List.sequence(startYear, endYear);
+
+// ============================================================
+// BLOQUE 1 – TEMPERATURA MÍNIMA MEDIA ANUAL
+// Promedio diario → promedio anual → promedio entre años
+// ============================================================
+var annualTmin = ee.ImageCollection(
+  years.map(function(year) {
+    return chirts_tmin
+      .filter(ee.Filter.calendarRange(year, year, 'year'))
+      .mean()                    // promedio diario del año
+      .rename('tmin_anual')
+      .clip(colombia)
+      .set('year', year);
+  })
+);
+
+// Promedio de todos los años
+var meanTmin = annualTmin.mean()
+  .rename('tmin_media_anual')
+  .clip(colombia);
+
+// ============================================================
+// BLOQUE 2 – CLASIFICACIÓN
+// < 19°C        → 0
+// 19 a 21.5°C   → 1
+// > 21.5°C      → 2
+// ============================================================
+var claseTmin = ee.Image(0).rename('clase_tmin')
+  .where(meanTmin.gte(19).and(meanTmin.lte(21.5)), 1)
+  .where(meanTmin.gt(21.5), 2)
+  .clip(colombia);
+
+// ============================================================
+// VISUALIZACIÓN
+// ============================================================
+Map.centerObject(colombia, 5);
+
+Map.addLayer(meanTmin,
+  {min: 10, max: 30, palette: ['#2166ac','#92c5de','#fddbc7','#d6604d','#b2182b']},
+  '① Tmin Media Anual (°C)', false);
+
+Map.addLayer(claseTmin,
+  {min: 0, max: 2, palette: ['#d73027','#fee08b','#1a9850']},
+  '② Clase – Tmin', true);
+
+// ============================================================
+// LEYENDA
+// ============================================================
+var legend = ui.Panel({
+  style:{position:'bottom-left', padding:'10px 15px', backgroundColor:'white'}
+});
+
+legend.add(ui.Label('Clasificación Tmin Media Anual',
+  {fontWeight:'bold', fontSize:'13px', margin:'0 0 6px 0'}));
+
+[
+  {color:'#d73027', label:'0 – Tmin < 19°C'},
+  {color:'#fee08b', label:'1 – Tmin 19°C a 21.5°C'},
+  {color:'#1a9850', label:'2 – Tmin > 21.5°C  ✓ óptimo'},
+].forEach(function(c){
+  var row = ui.Panel({layout:ui.Panel.Layout.flow('horizontal')});
+  row.add(ui.Label('',{backgroundColor:c.color,
+    padding:'7px', margin:'0 8px 3px 0', border:'1px solid #ccc'}));
+  row.add(ui.Label(c.label, {margin:'0 0 3px 0'}));
+  legend.add(row);
+});
+
+Map.add(legend);
+
+// ============================================================
+// CONSOLA
+// ============================================================
+print('Tmin media anual (°C):', meanTmin);
+print('Clase Tmin:', claseTmin);
+
+// ============================================================
+// EXPORTAR – CAPAS SEPARADAS
+// ============================================================
+Export.image.toDrive({
+  image: meanTmin,
+  description: '01_Tmin_Media_Anual',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
+
+Export.image.toDrive({
+  image: claseTmin,
+  description: '02_Clase_Tmin',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
