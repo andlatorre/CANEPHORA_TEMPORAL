@@ -1,0 +1,116 @@
+// ============================================================
+// TEMPERATURA MÁXIMA MEDIA ANUAL - CHIRTS
+// Clasificación por umbrales de Tmax
+// Área: Colombia
+// ============================================================
+
+var startYear = 2000;
+var endYear   = 2023;
+
+var colombia = ee.Geometry.Rectangle([-80.5, -5.0, -65.5, 14.5]);
+
+var chirts_tmax = ee.ImageCollection('UCSB-CHG/CHIRTS/DAILY')
+  .filter(ee.Filter.date(startYear + '-01-01', endYear + '-12-31'))
+  .filterBounds(colombia)
+  .select('maximum_temperature');
+
+var years = ee.List.sequence(startYear, endYear);
+
+// ============================================================
+// BLOQUE 1 – TEMPERATURA MÁXIMA MEDIA ANUAL
+// Promedio diario → promedio anual → promedio entre años
+// ============================================================
+var annualTmax = ee.ImageCollection(
+  years.map(function(year) {
+    return chirts_tmax
+      .filter(ee.Filter.calendarRange(year, year, 'year'))
+      .mean()                    // promedio diario del año
+      .rename('tmax_anual')
+      .clip(colombia)
+      .set('year', year);
+  })
+);
+
+// Promedio de todos los años
+var meanTmax = annualTmax.mean()
+  .rename('tmax_media_anual')
+  .clip(colombia);
+
+// ============================================================
+// BLOQUE 2 – CLASIFICACIÓN
+// > 31.5°C          → 0
+// 28.5°C a 31.5°C   → 1
+// < 28.5°C          → 2
+// ============================================================
+var claseTmax = ee.Image(0).rename('clase_tmax')
+  .where(meanTmax.gte(28.5).and(meanTmax.lte(31.5)), 1)
+  .where(meanTmax.lt(28.5), 2)
+  .clip(colombia);
+
+// ============================================================
+// VISUALIZACIÓN
+// ============================================================
+Map.centerObject(colombia, 5);
+
+Map.addLayer(meanTmax,
+  {min: 15, max: 40, palette: ['#2166ac','#92c5de','#fddbc7','#d6604d','#b2182b']},
+  '① Tmax Media Anual (°C)', false);
+
+Map.addLayer(claseTmax,
+  {min: 0, max: 2, palette: ['#d73027','#fee08b','#1a9850']},
+  '② Clase – Tmax', true);
+
+// ============================================================
+// LEYENDA
+// ============================================================
+var legend = ui.Panel({
+  style:{position:'bottom-left', padding:'10px 15px', backgroundColor:'white'}
+});
+
+legend.add(ui.Label('Clasificación Tmax Media Anual',
+  {fontWeight:'bold', fontSize:'13px', margin:'0 0 6px 0'}));
+
+[
+  {color:'#d73027', label:'0 – Tmax > 31.5°C'},
+  {color:'#fee08b', label:'1 – Tmax 28.5°C a 31.5°C'},
+  {color:'#1a9850', label:'2 – Tmax < 28.5°C  ✓ óptimo'},
+].forEach(function(c){
+  var row = ui.Panel({layout:ui.Panel.Layout.flow('horizontal')});
+  row.add(ui.Label('',{backgroundColor:c.color,
+    padding:'7px', margin:'0 8px 3px 0', border:'1px solid #ccc'}));
+  row.add(ui.Label(c.label, {margin:'0 0 3px 0'}));
+  legend.add(row);
+});
+
+Map.add(legend);
+
+// ============================================================
+// CONSOLA
+// ============================================================
+print('Tmax media anual (°C):', meanTmax);
+print('Clase Tmax:', claseTmax);
+
+// ============================================================
+// EXPORTAR – CAPAS SEPARADAS
+// ============================================================
+Export.image.toDrive({
+  image: meanTmax,
+  description: '01_Tmax_Media_Anual',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
+
+Export.image.toDrive({
+  image: claseTmax,
+  description: '02_Clase_Tmax',
+  folder: 'GEE_Exports',
+  region: colombia,
+  scale: 5566,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326'
+});
